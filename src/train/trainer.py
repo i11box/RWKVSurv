@@ -61,12 +61,6 @@ class Trainer:
             self.loss_fn = WeightedBCELoss(pos_weight=pos_weight)
             print(f'使用加权损失函数，正样本权重: {pos_weight}')
 
-        # if 'wandb' in sys.modules:
-        #     cfg = model.config
-        #     for k in config.__dict__:
-        #         setattr(cfg, k, config.__dict__[k]) # combine cfg
-        #     wandb.init(project="RWKV-LM", name=self.get_run_name() + '-' + datetime.datetime.today().strftime('%Y-%m-%d-%H-%M-%S'), config=cfg, save_code=False)
-
         self.device = 'cpu'
         if torch.cuda.is_available(): # take over whatever gpus are on the system
             self.device = torch.cuda.current_device()
@@ -93,8 +87,7 @@ class Trainer:
 
             pbar = tqdm(enumerate(loader), total=len(loader), bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}') if is_train else enumerate(loader)
             
-            # 
-            progress = 0
+            losses = []
             
             for it, (static_features, dynamic_features, targets, durations) in pbar:
                 static_features = static_features.to(self.device)
@@ -105,8 +98,24 @@ class Trainer:
                 with torch.set_grad_enabled(is_train):
                     if self.use_weighted_loss:
                         # 使用加权损失函数
-                        risk_scores, _, _ = model(static_features, dynamic_features)
-                        loss = self.loss_fn(risk_scores, targets)
+                        risk_scores, time_preds, _ = model(static_features, dynamic_features)
+                        
+                        # 创建目标矩阵
+                        batch_size, time_steps, prediction_horizon = risk_scores.shape
+                        target_matrix = torch.zeros_like(risk_scores)
+                        
+                        for b in range(batch_size):
+                            if targets[b] == 1:  # 如果该样本发生了AKI
+                                aki_time = int(durations[b].item())  # AKI发生的时间步
+                                
+                                for t in range(time_steps):
+                                    if t < aki_time:
+                                        for h in range(min(prediction_horizon, time_steps - t)):
+                                            if t + h >= aki_time:
+                                                target_matrix[b, t, h] = 1
+                        
+                        # 计算加权二元交叉熵损失
+                        loss = self.loss_fn(risk_scores.view(-1), target_matrix.view(-1))
                     else:
                         # 使用模型原有的损失函数
                         _, _, loss = model(static_features, dynamic_features, targets, durations)
@@ -117,43 +126,29 @@ class Trainer:
                     model.zero_grad()
                     loss.backward()
 
+                    # 应用梯度裁剪以提高稳定性
                     torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm_clip)
                     optimizer.step()
                     
-                    if config.lr_decay: # decay the learning rate based on our progress
-                        self.tokens += (targets >= 0).sum() # number of tokens processed this step (i.e. label is not -100)
-                        lr_final_factor = config.lr_final / config.learning_rate
-                        if self.tokens < config.warmup_tokens:
-                            # linear warmup
-                            lr_mult = lr_final_factor + (1 - lr_final_factor) * float(self.tokens) / float(config.warmup_tokens)
-                            progress = 0
-                        else:
-                            # cosine learning rate decay
-                            progress = float(self.tokens - config.warmup_tokens) / float(max(1, config.final_tokens - config.warmup_tokens))
-                            # progress = min(progress * 1.1, 1.0) # more fine-tuning with low LR
-                            lr_mult = (0.5 + lr_final_factor / 2) + (0.5 - lr_final_factor / 2) * math.cos(math.pi * progress) # better 1.0 ~ 0.1
-                        lr = config.learning_rate * lr_mult
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr
-                    else:
-                        lr = config.learning_rate
+                    # 使用固定学习率，移除复杂的学习率调度
+                    lr = config.learning_rate
 
-                    now_loss = loss.item() # report progress
+                    # 记录当前损失
+                    now_loss = loss.item()
+                    losses.append(now_loss)
                     
-                    if 'wandb' in sys.modules:
-                        wandb.log({"loss": now_loss}, step = self.steps * self.config.batch_size)
+                    # 计算平均损失用于显示
+                    avg_loss = sum(losses[-100:]) / len(losses[-100:]) if losses else 0
+                    
+                    # 更新进度条
+                    pbar.set_description(f"epoch {epoch+1} iter {it}: loss {now_loss:.4f} avg_loss {avg_loss:.4f} lr {lr:e}")
+                    
                     self.steps += 1
-
-                    if self.avg_loss < 0:
-                        self.avg_loss = now_loss
-                    else:
-                        # factor = max(1.0 / 300, 1.0 / math.sqrt(it + 1))
-                        factor = 1 / (it + 1)
-                        self.avg_loss = self.avg_loss * (1.0 - factor) + now_loss * factor
-                    pbar.set_description(f"epoch {epoch+1} progress {progress*100.0:.2f}% iter {it}: ppl {math.exp(self.avg_loss):.2f} loss {self.avg_loss:.4f} lr {lr:e}")
+            
+            # 返回该轮的平均损失
+            return sum(losses) / len(losses) if losses else 0
 
         # while True:
-        self.tokens = 0 # counter used for learning rate decay
         for epoch in range(config.max_epochs):
 
             run_epoch('train')

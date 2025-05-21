@@ -167,7 +167,7 @@ def split_dataset(input_file, train_ratio=0.8, random_state=42, output_dir='data
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='分割数据集并进行欠采样')
-    parser.add_argument('--input', type=str, default='data/aki_hypertension_data.csv', help='输入数据路径')
+    parser.add_argument('--input', type=str, default='data/aki_hypertension_data_processed.csv', help='输入数据路径')
     parser.add_argument('--output_dir', type=str, default='data', help='输出目录')
     parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例，默认为0.8')
     parser.add_argument('--random_state', type=int, default=42, help='随机种子')
