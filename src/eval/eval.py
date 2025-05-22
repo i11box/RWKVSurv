@@ -7,14 +7,14 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pycox.evaluation import EvalSurv
-from lifelines.utils import concordance_index
+import logging
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, classification_report
-
-# 添加项目根目录到路径
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
+from lifelines.utils import concordance_index
+from imblearn.under_sampling import RandomUnderSampler
+sys.path.append("D:/05_Project/03_Python/RWKVSurv")
 from src.model.model import AKIConfig, AKIPredictor, prepare_data
+
+logger = logging.getLogger(__name__)
 
 def load_model(model_path, config=None):
     """
@@ -141,7 +141,7 @@ def plot_confusion_matrix(y_true, y_pred, output_dir='data/results', threshold=0
     
     return cm, report
 
-def evaluate_model(model, test_data, time_steps=48, output_dir='data/results', threshold=0.8):
+def evaluate_model(model, test_data, time_steps=48, h=6, output_dir='data/results', threshold=0.5):
     """
     评估模型性能
     
@@ -149,13 +149,14 @@ def evaluate_model(model, test_data, time_steps=48, output_dir='data/results', t
     - model: 训练好的模型
     - test_data: 测试数据DataFrame
     - time_steps: 时间步数
+    - h: 提前预测步数，小于这个时间步发生的数据先筛除
     - output_dir: 输出目录
     - threshold: 分类阈值，默认为0.5
     
     返回:
-    - c_index: 一致性指数
-    - results_df: 包含风险评分、持续时间和事件的DataFrame
-    - horizon_metrics: 不同预测提前时间的评估指标
+    - accuracy: 准确率
+    - results_df: 包含预测概率、持续时间和事件的DataFrame
+    - metrics: 包含准确率、精确度、召回率和F1分数的字典
     """
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
@@ -163,8 +164,41 @@ def evaluate_model(model, test_data, time_steps=48, output_dir='data/results', t
     # 准备数据
     try:
         print("准备数据...")
-        static_features, dynamic_features, targets, durations = prepare_data(test_data, time_steps)
+        print(f"提前预测步数 h = {h}")
+        static_features, dynamic_features, targets, durations = prepare_data(test_data, time_steps, h=h)
         print(f"数据准备完成: {static_features.shape[0]} 个样本")
+        
+        # 计算正负样本数量
+        positive_count = torch.sum(targets == 1).item()
+        negative_count = torch.sum(targets == 0).item()
+        print(f"原始数据: 正样本数量: {positive_count}, 负样本数量: {negative_count}, 正负比例: {positive_count/negative_count:.4f}")
+        
+        # 执行欠采样以平衡类别
+        if positive_count < negative_count:
+            print("执行欠采样以平衡类别...")
+            # 准备数据用于欠采样
+            indices = np.arange(len(targets))
+            X = np.column_stack([indices])
+            y = targets.cpu().numpy()
+            
+            # 创建欠采样器
+            undersampler = RandomUnderSampler(sampling_strategy='majority', random_state=42)
+            X_resampled, y_resampled = undersampler.fit_resample(X, y)
+            
+            # 获取欠采样后的索引
+            resampled_indices = X_resampled[:, 0].astype(int)
+            
+            # 应用欠采样
+            static_features = static_features[resampled_indices]
+            dynamic_features = dynamic_features[resampled_indices]
+            targets = targets[resampled_indices]
+            durations = durations[resampled_indices]
+            
+            # 计算欠采样后的正负样本数量
+            positive_count = torch.sum(targets == 1).item()
+            negative_count = torch.sum(targets == 0).item()
+            print(f"欠采样后: 正样本数量: {positive_count}, 负样本数量: {negative_count}, 正负比例: {positive_count/negative_count:.4f}")
+            print(f"欠采样后样本总数: {len(targets)}")
     except Exception as e:
         print(f"数据准备失败: {e}")
         raise
@@ -195,119 +229,81 @@ def evaluate_model(model, test_data, time_steps=48, output_dir='data/results', t
     targets = targets.to(device)
     durations = durations.to(device)
     
-    # 获取风险评分
+    # 获取AKI发生概率
     with torch.no_grad():
         try:
-            outputs = model(static_features, dynamic_features)
+            # 设置为评估模式（非训练模式）
+            aki_probs, _ = model(static_features, dynamic_features, is_training=False)
             
-            # 处理不同的返回格式
-            if isinstance(outputs, tuple) and len(outputs) >= 2:
-                risk_scores, time_preds = outputs[0], outputs[1]
-            else:
-                risk_scores = outputs
-                time_preds = None
-                
             # 检查输出是否包含NaN/Inf
-            check_nan_inf(risk_scores, "风险评分")
-            if time_preds is not None:
-                check_nan_inf(time_preds, "时间预测")
+            check_nan_inf(aki_probs, "AKI发生概率")
         except Exception as e:
             print(f"模型推理失败: {e}")
             raise
     
-    # 打印原始形状信息
-    print(f"原始 risk_scores shape: {risk_scores.shape}")
-    if time_preds is not None:
-        print(f"原始 time_preds shape: {time_preds.shape}")
+    # 打印形状信息
+    print(f"aki_probs shape: {aki_probs.shape}")
     print(f"targets shape: {targets.shape}")
     print(f"durations shape: {durations.shape}")
     
-    # 创建目标矩阵，与训练时保持一致
-    batch_size, time_steps, prediction_horizon = risk_scores.shape
-    target_matrix = torch.zeros_like(risk_scores)
+    # 将概率转换为二分类预测
+    aki_preds = (aki_probs.squeeze(-1) > threshold).float()
     
-    for b in range(batch_size):
-        if targets[b] == 1:  # 如果该样本发生了AKI
-            aki_time = int(durations[b].item())  # AKI发生的时间步
-            
-            for t in range(time_steps):
-                if t < aki_time:
-                    for h in range(min(prediction_horizon, time_steps - t)):
-                        if t + h >= aki_time:
-                            target_matrix[b, t, h] = 1
+    # 计算分类指标
+    accuracy = accuracy_score(targets.cpu().numpy(), aki_preds.cpu().numpy())
+    precision = precision_score(targets.cpu().numpy(), aki_preds.cpu().numpy(), zero_division=0)
+    recall = recall_score(targets.cpu().numpy(), aki_preds.cpu().numpy(), zero_division=0)
+    f1 = f1_score(targets.cpu().numpy(), aki_preds.cpu().numpy(), zero_division=0)
     
-    # 计算加权二元交叉熵损失
-    pos_weight = 1.0  # 与训练时保持一致
-    weighted_bce_loss = F.binary_cross_entropy_with_logits(
-        risk_scores, target_matrix, 
-        pos_weight=torch.tensor([pos_weight], device=risk_scores.device)
-    ).item()
-    print(f"加权BCE损失: {weighted_bce_loss:.4f}")
-    
-    # 将风险评分转换为概率
-    risk_probs = torch.sigmoid(risk_scores)
-    
-    # 聚合风险评分以计算每个样本的总体风险
-    # 取每个样本的最大风险概率
-    sample_risk_probs = risk_probs.max(dim=1)[0].max(dim=1)[0]
-    
-    # 转换为numpy数组
-    risk_probs_np = risk_probs.cpu().numpy()
-    target_matrix_np = target_matrix.cpu().numpy()
-    sample_risk_probs_np = sample_risk_probs.cpu().numpy()
-    targets_np = targets.cpu().numpy()
-    durations_np = durations.cpu().numpy()
-    
-    # 打印聚合后的形状信息
-    print(f"聚合后 risk_scores shape: {sample_risk_probs_np.shape}")
-    print(f"targets shape: {targets_np.shape}")
-    print(f"durations shape: {durations_np.shape}")
-    
-    # 将风险评分转换为二分类预测
-    binary_pred = (sample_risk_probs_np > threshold).astype(int)
-    
-    # 创建时间步预测数组
-    if time_preds is not None:
-        time_pred = time_preds.cpu().numpy()
-        # 聚合时间预测（取最大风险所对应的时间预测）
-        # 先找到每个样本的最大风险概率的索引
-        max_risk_indices = risk_probs.view(batch_size, -1).max(dim=1)[1]
-        # 计算对应的时间步和预测尺度索引
-        time_step_indices = max_risk_indices // prediction_horizon
-        horizon_indices = max_risk_indices % prediction_horizon
-        # 提取对应的时间预测
-        sample_time_preds = np.array([
-            time_preds[b, time_step_indices[b], horizon_indices[b]].item() 
-            for b in range(batch_size)
-        ])
-    else:
-        sample_time_preds = np.full(batch_size, -1)
-    
-    # 计算C-index（一致性指数）
-    c_index = concordance_index(durations_np, sample_risk_probs_np, targets_np)
-    
-    print(f"C-index: {c_index:.4f}")
-    
-    # 计算混淆矩阵和分类指标
-    tn, fp, fn, tp = confusion_matrix(targets_np, binary_pred).ravel()
-    accuracy = accuracy_score(targets_np, binary_pred)
-    precision = precision_score(targets_np, binary_pred)
-    recall = recall_score(targets_np, binary_pred)
-    f1 = f1_score(targets_np, binary_pred)
-    
-    print(f"混淆矩阵:TN: {tn}, FP: {fp} FN: {fn}, TP: {tp}")
     print(f"准确率: {accuracy:.4f}")
-    print(f"精确率: {precision:.4f}")
+    print(f"精确度: {precision:.4f}")
     print(f"召回率: {recall:.4f}")
     print(f"F1分数: {f1:.4f}")
     
-    # 计算ROC曲线和AUC
-    fpr, tpr, _ = roc_curve(targets_np, sample_risk_probs_np)
+    # 生成混淆矩阵
+    cm, report = plot_confusion_matrix(
+        targets.cpu().numpy(), 
+        aki_probs.squeeze(-1).cpu().numpy(), 
+        output_dir=output_dir,
+        threshold=threshold
+    )
+    
+    # 转换为numpy数组，用于后续计算
+    aki_probs_np = aki_probs.squeeze(-1).cpu().numpy()
+    targets_np = targets.cpu().numpy()
+    durations_np = durations.cpu().numpy()
+    
+    # 打印形状信息
+    print(f"aki_probs shape: {aki_probs_np.shape}")
+    print(f"targets shape: {targets_np.shape}")
+    print(f"durations shape: {durations_np.shape}")
+    
+    # 将概率转换为二分类预测
+    binary_pred = (aki_probs_np > threshold).astype(int)
+    
+    # 计算AUC
+    fpr, tpr, _ = roc_curve(targets_np, aki_probs_np)
     roc_auc = auc(fpr, tpr)
     print(f"AUC: {roc_auc:.4f}")
     
+    # 创建结果数据帧
+    results_df = pd.DataFrame({
+        'aki_prob': aki_probs_np,
+        'aki_pred': binary_pred,
+        'actual': targets_np,
+        'duration': durations_np
+    })
+    
+    # 保存结果数据帧
+    results_file = os.path.join(output_dir, 'results.csv')
+    results_df.to_csv(results_file, index=False)
+    print(f"结果已保存到 {results_file}")
+    
     # 绘制ROC曲线
-    plt.figure(figsize=(8, 6))
+    fpr, tpr, _ = roc_curve(targets.cpu().numpy(), aki_probs.squeeze(-1).cpu().numpy())
+    roc_auc = auc(fpr, tpr)
+    
+    plt.figure(figsize=(10, 8))
     plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
     plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
     plt.xlim([0.0, 1.0])
@@ -315,38 +311,24 @@ def evaluate_model(model, test_data, time_steps=48, output_dir='data/results', t
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('Receiver Operating Characteristic')
-    plt.legend(loc="lower right")
-    plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
+    plt.legend(loc='lower right')
+    
+    # 保存ROC曲线
+    roc_file = os.path.join(output_dir, 'roc_curve.png')
+    plt.savefig(roc_file)
     plt.close()
+    print(f"ROC曲线已保存到 {roc_file}")
     
-    # 创建结果DataFrame
-    results_df = pd.DataFrame({
-        'subject_id': test_data['subject_id'].values[:len(targets_np)],
-        'risk_score': sample_risk_probs_np,
-        'prediction': binary_pred,
-        'actual': targets_np,
-        'duration': durations_np,
-        'actual_time': durations_np * targets_np  # 只有发生事件的样本才有实际时间
-    })
+    # 收集指标
+    metrics = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc': roc_auc
+    }
     
-    # 保存结果
-    results_df.to_csv(os.path.join(output_dir, 'evaluation_results.csv'), index=False)
-    
-    # 绘制混淆矩阵
-    plot_confusion_matrix(targets_np, binary_pred, output_dir, threshold)
-    
-    # 绘制生存曲线
-    plot_survival_curves(results_df, 3, output_dir)
-    
-    # 评估不同预测提前时间的性能
-    # 定义要评估的预测提前时间（horizon）
-    horizons_to_evaluate = [6, 8, 10, 12]
-    horizon_metrics = evaluate_prediction_horizons(
-        risk_probs_np, target_matrix_np, targets_np, durations_np, 
-        horizons_to_evaluate, threshold, output_dir
-    )
-    
-    return c_index, results_df, horizon_metrics
+    return accuracy, results_df, metrics
 
 def evaluate_prediction_horizons(risk_probs, target_matrix, targets, durations, horizons, threshold=0.5, output_dir='data/results'):
     """
@@ -527,6 +509,7 @@ def parse_args():
     parser.add_argument('--model', type=str, default='data/ckpt/trained-model-.pt', help='模型路径')
     parser.add_argument('--data', type=str, default='data/aki_hypertension_data_processed_eval.csv', help='测试数据路径')
     parser.add_argument('--time_steps', type=int, default=48, help='时间步数')
+    parser.add_argument('--h', type=int, default=6, help='提前预测步数，小于这个时间步发生的数据先筛除')
     parser.add_argument('--output', type=str, default='data/results', help='输出结果目录')
     parser.add_argument('--groups', type=int, default=3, help='风险组数量')
     parser.add_argument('--threshold', type=float, default=0.515, help='分类阈值，默认为0.5，用于生成混淆矩阵')
@@ -561,7 +544,8 @@ def main():
     print("准备数据以获取特征维度...")
     try:
         # 准备数据
-        static_features, dynamic_features, targets, durations = prepare_data(test_data, args.time_steps)
+        print(f"提前预测步数 h = {args.h}")
+        static_features, dynamic_features, targets, durations = prepare_data(test_data, args.time_steps, h=args.h)
         
         # 获取特征维度
         static_dim = static_features.shape[1]  # 静态特征维度
@@ -577,7 +561,8 @@ def main():
             ctx_len=time_steps,
             embed_dim=128,
             n_layer=3,
-            n_head=4
+            n_head=4,
+            h=args.h  # 添加提前预测步数
         )
         
         if args.weighted_loss:
@@ -595,57 +580,26 @@ def main():
         return
     
     # 评估模型
-    c_index, results_df, horizon_metrics = evaluate_model(model, test_data, args.time_steps, args.output, args.threshold)
-    
-    # 绘制生存曲线
-    plot_survival_curves(results_df, args.groups, args.output)
+    accuracy, results_df, metrics = evaluate_model(model, test_data, args.time_steps, args.h, args.output, args.threshold)
     
     # 保存评估结果
     result_file = os.path.join(args.output, 'evaluation_results.txt')
     with open(result_file, 'w') as f:
-        f.write(f"C-index: {c_index:.4f}\n\n")
-        
-        # 保存不同预测提前时间的评估指标
-        f.write("不同预测提前时间的评估指标：\n")
-        
-        # 确保 horizon_metrics 是一个字典
-        if not isinstance(horizon_metrics, dict):
-            f.write("警告: 无法获取预测提前时间的评估指标 (无效的格式)\n")
-            print(f"警告: horizon_metrics 的类型是 {type(horizon_metrics)}, 预期是字典")
-            if horizon_metrics is not None:
-                print(f"horizon_metrics 内容: {horizon_metrics}")
-        else:
-            for horizon, metrics in horizon_metrics.items():
-                try:
-                    if not isinstance(metrics, dict):
-                        f.write(f"\n预测提前时间: {horizon} 小时 - 警告: 指标格式无效\n")
-                        print(f"警告: 预测提前时间 {horizon} 的指标不是字典格式: {type(metrics)}")
-                        continue
-                        
-                    f.write(f"\n预测提前时间: {horizon} 小时\n")
-                    # 使用安全的字典访问方式
-                    metrics_data = {
-                        'accuracy': metrics.get('accuracy', 0),
-                        'precision': metrics.get('precision', 0),
-                        'recall': metrics.get('recall', 0),
-                        'f1': metrics.get('f1', 0),
-                        'auc': metrics.get('auc', 0),
-                        'tn': metrics.get('tn', 0),
-                        'fp': metrics.get('fp', 0),
-                        'fn': metrics.get('fn', 0),
-                        'tp': metrics.get('tp', 0)
-                    }
-                    
-                    f.write(f"  - 准确率: {metrics_data['accuracy']:.4f}\n")
-                    f.write(f"  - 精确率: {metrics_data['precision']:.4f}\n")
-                    f.write(f"  - 召回率: {metrics_data['recall']:.4f}\n")
-                    f.write(f"  - F1分数: {metrics_data['f1']:.4f}\n")
-                    f.write(f"  - AUC: {metrics_data['auc']:.4f}\n")
-                    f.write(f"  - 混淆矩阵: TN={metrics_data['tn']}, FP={metrics_data['fp']}, "
-                          f"FN={metrics_data['fn']}, TP={metrics_data['tp']}\n")
-                except Exception as e:
-                    f.write(f"\n预测提前时间: {horizon} 小时 - 处理指标时出错: {str(e)}\n")
-                    print(f"处理预测提前时间 {horizon} 的指标时出错: {e}")
+        f.write(f"评估结果汇总 (h = {args.h}):\n\n")
+        f.write(f"准确率 (Accuracy): {metrics['accuracy']:.4f}\n")
+        f.write(f"精确度 (Precision): {metrics['precision']:.4f}\n")
+        f.write(f"召回率 (Recall): {metrics['recall']:.4f}\n")
+        f.write(f"F1分数 (F1 Score): {metrics['f1']:.4f}\n")
+        f.write(f"AUC: {metrics['auc']:.4f}\n")
+
+        f.write("\n混淆矩阵已保存到 confusion_matrix.png\n")
+        f.write("ROC曲线已保存到 roc_curve.png\n")
+
+        # 在新的模型结构中，我们不再计算不同预测提前时间的评估指标
+        # 因为我们现在直接预测未来h步内是否会发生AKI
+        f.write(f"\n欠采样信息:\n")
+        f.write(f"提前预测步数 h = {args.h}\n")
+        f.write(f"欠采样确保了类平衡，可以更准确地评估模型性能\n")
     
     print(f"评估结果已保存到 {result_file}")
 

@@ -98,27 +98,13 @@ class Trainer:
                 with torch.set_grad_enabled(is_train):
                     if self.use_weighted_loss:
                         # 使用加权损失函数
-                        risk_scores, time_preds, _ = model(static_features, dynamic_features)
+                        aki_probs, _ = model(static_features, dynamic_features, targets, durations, is_training=is_train)
                         
-                        # 创建目标矩阵
-                        batch_size, time_steps, prediction_horizon = risk_scores.shape
-                        target_matrix = torch.zeros_like(risk_scores)
-                        
-                        for b in range(batch_size):
-                            if targets[b] == 1:  # 如果该样本发生了AKI
-                                aki_time = int(durations[b].item())  # AKI发生的时间步
-                                
-                                for t in range(time_steps):
-                                    if t < aki_time:
-                                        for h in range(min(prediction_horizon, time_steps - t)):
-                                            if t + h >= aki_time:
-                                                target_matrix[b, t, h] = 1
-                        
-                        # 计算加权二元交叉熵损失
-                        loss = self.loss_fn(risk_scores.view(-1), target_matrix.view(-1))
+                        # 计算加权二元交叉熏损失
+                        loss = self.loss_fn(aki_probs.squeeze(-1), targets)
                     else:
                         # 使用模型原有的损失函数
-                        _, _, loss = model(static_features, dynamic_features, targets, durations)
+                        _, loss = model(static_features, dynamic_features, targets, durations, is_training=is_train)
                     
                     loss = loss.mean()         # collapse all losses if they are scattered on multiple gpus
 

@@ -19,11 +19,13 @@ def parse_args():
     parser.add_argument('--data', type=str, default='data/generated_data_processed_train.csv', help='训练数据路径')
     parser.add_argument('--resume', action='store_true', help='是否从断点继续训练')
     parser.add_argument('--checkpoint', type=str, default='data/ckpt/trained-model-.pt', help='断点模型路径')
-    parser.add_argument('--epochs', type=int, default=200, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=500, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=128, help='批量大小')
     parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
     parser.add_argument('--save_freq', type=int, default=10, help='模型保存频率')
     parser.add_argument('--save_path', type=str, default='data/ckpt/trained-model-', help='模型保存路径')
+    # 模型相关参数
+    parser.add_argument('--h', type=int, default=6, help='提前预测步数，小于这个时间步发生的数据先筛除')
     # 数据平衡相关参数
     parser.add_argument('--undersample', action='store_true', help='是否使用欠采样使正负样本比例为1:1')
     parser.add_argument('--weighted_loss', action='store_true', help='是否使用加权损失函数处理数据不平衡')
@@ -42,7 +44,8 @@ def main():
     data = pd.read_csv(args.data)
     
     # 准备数据
-    static_features, dynamic_features, targets, durations = prepare_data(data)
+    print(f'提前预测步数 h = {args.h}')
+    static_features, dynamic_features, targets, durations = prepare_data(data, h=args.h)
     
     # 如果使用欠采样，对数据进行重采样使正负样本比例为1:1
     if args.undersample:
@@ -114,7 +117,8 @@ def main():
                     embed_dim=128,
                     n_layer=3,
                     n_head=4,
-                    ctx_len=time_steps
+                    ctx_len=time_steps,
+                    h=args.h
                 ))
         except Exception as e:
             print(f'加载模型失败: {e}')
@@ -136,7 +140,8 @@ def main():
             embed_dim=128,
             n_layer=3,
             n_head=4,
-            ctx_len=time_steps
+            ctx_len=time_steps,
+            h=args.h
         ))
     
     # 训练配置
