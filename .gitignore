@@ -5,3 +5,5 @@ data/aki_hypertension_data.csv
 *.png
 *.pyc
 
+/data
+*.pyc
