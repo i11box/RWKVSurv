@@ -16,10 +16,14 @@ class LSTMBlock(nn.Module):
         self.lstm = nn.LSTM(
             input_size=config.n_embd,
             hidden_size=config.n_embd,
-            num_layers=1,
+            num_layers=config.lstm_layers,
             batch_first=True,
-            bidirectional=False
+            bidirectional=config.lstm_bidirectional
         )
+        
+        # 如果是双向LSTM，需要将输出维度调整为n_embd
+        if config.lstm_bidirectional:
+            self.direction_proj = nn.Linear(config.n_embd * 2, config.n_embd)
         
         # 前馈网络，替代RWKV_ChannelMix
         hidden_size = 4 * config.n_embd  # 类似于原始实现中的hidden_sz
@@ -42,6 +46,10 @@ class LSTMBlock(nn.Module):
         
         # 应用LSTM层
         lstm_out, _ = self.lstm(normed_x)
+        
+        # 如果是双向LSTM，需要将输出维度调整为n_embd
+        if self.config.lstm_bidirectional:
+            lstm_out = self.direction_proj(lstm_out)
         
         # 应用dropout
         lstm_out = self.dropout(lstm_out)

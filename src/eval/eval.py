@@ -510,6 +510,19 @@ def parse_args():
     parser.add_argument('--data', type=str, default='data/aki_hypertension_data_processed_eval.csv', help='测试数据路径')
     parser.add_argument('--time_steps', type=int, default=48, help='时间步数')
     parser.add_argument('--h', type=int, default=6, help='提前预测步数，小于这个时间步发生的数据先筛除')
+    parser.add_argument('--model_type', type=str, default='RWKV', choices=['RWKV', 'LSTM', 'GRU', 'Transformer'], help='模型类型: RWKV, LSTM, GRU, Transformer')
+    
+    # LSTM特定参数
+    parser.add_argument('--lstm_layers', type=int, default=1, help='LSTM层数')
+    parser.add_argument('--lstm_bidirectional', action='store_true', help='是否使用双向LSTM')
+    
+    # GRU特定参数
+    parser.add_argument('--gru_layers', type=int, default=1, help='GRU层数')
+    parser.add_argument('--gru_bidirectional', action='store_true', help='是否使用双向GRU')
+    
+    # Transformer特定参数
+    parser.add_argument('--attn_dropout', type=float, default=0.1, help='Transformer注意力机制的dropout率')
+    parser.add_argument('--ff_activation', type=str, default='gelu', choices=['gelu', 'relu', 'silu', 'mish'], help='Transformer前馈网络的激活函数类型')
     parser.add_argument('--output', type=str, default='data/results', help='输出结果目录')
     parser.add_argument('--groups', type=int, default=3, help='风险组数量')
     parser.add_argument('--threshold', type=float, default=0.515, help='分类阈值，默认为0.5，用于生成混淆矩阵')
@@ -562,8 +575,23 @@ def main():
             embed_dim=128,
             n_layer=3,
             n_head=4,
-            h=args.h  # 添加提前预测步数
+            h=args.h,  # 提前预测步数
+            model_type=args.model_type,  # 模型类型
+            
+            # LSTM特定参数
+            lstm_layers=args.lstm_layers,
+            lstm_bidirectional=args.lstm_bidirectional,
+            
+            # GRU特定参数
+            gru_layers=args.gru_layers,
+            gru_bidirectional=args.gru_bidirectional,
+            
+            # Transformer特定参数
+            attn_dropout=args.attn_dropout,
+            ff_activation=args.ff_activation
         )
+        
+        print(f"使用模型类型: {args.model_type}")
         
         if args.weighted_loss:
             config.pos_weight = args.pos_weight

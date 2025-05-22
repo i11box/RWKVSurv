@@ -22,7 +22,7 @@ class MultiHeadAttention(nn.Module):
         self.output = nn.Linear(config.n_embd, config.n_embd)
         
         # Dropout
-        self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.1)
+        self.dropout = nn.Dropout(config.attn_dropout if hasattr(config, 'attn_dropout') else config.dropout)
         
         # 缩放因子
         self.scale = 1.0 / math.sqrt(self.head_size)
@@ -72,9 +72,22 @@ class MultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
+        
+        # 根据配置选择激活函数
+        if config.ff_activation.lower() == 'gelu':
+            activation = nn.GELU()
+        elif config.ff_activation.lower() == 'relu':
+            activation = nn.ReLU()
+        elif config.ff_activation.lower() == 'silu' or config.ff_activation.lower() == 'swish':
+            activation = nn.SiLU()
+        elif config.ff_activation.lower() == 'mish':
+            activation = nn.Mish()
+        else:
+            activation = nn.GELU()  # 默认使用GELU
+        
         self.net = nn.Sequential(
             nn.Linear(config.n_embd, 4 * config.n_embd),
-            nn.GELU(),
+            activation,
             nn.Linear(4 * config.n_embd, config.n_embd),
             nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.1)
         )

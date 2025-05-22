@@ -24,27 +24,58 @@ class AKIConfig:
                  n_ffn=256, 
                  ctx_len=5, 
                  dropout=0.1, 
-                 h=6,               # 提前预测步数，默认为6
+                 h=6,                    # 提前预测步数，默认为6
+                 model_type='RWKV',       # 模型类型: 'RWKV', 'LSTM', 'GRU', 'Transformer'
+                 
+                 # LSTM特定参数
+                 lstm_layers=1,           # LSTM层数
+                 lstm_bidirectional=False, # 是否使用双向LSTM
+                 
+                 # GRU特定参数
+                 gru_layers=1,            # GRU层数
+                 gru_bidirectional=False,  # 是否使用双向GRU
+                 
+                 # Transformer特定参数
+                 attn_dropout=0.1,        # 注意力机制的dropout率
+                 ff_activation='gelu',    # 前馈网络的激活函数类型
+                 
                  **kwargs):
+        # 基本参数
         self.static_dim = static_dim      # 静态特征维度
         self.dynamic_dim = dynamic_dim    # 每个时间步的动态特征维度
         self.embed_dim = embed_dim        # 嵌入维度
-        self.n_layer = n_layer            # RWKV块的数量
+        self.n_layer = n_layer            # 网络块的数量
         self.n_head = n_head              # 注意力头数
         self.n_attn = n_attn              # 注意力维度
         self.n_ffn = n_ffn                # 前馈网络维度
         self.ctx_len = ctx_len            # 上下文长度（时间步数）
         self.dropout = dropout            # Dropout率
-        self.n_embd = embed_dim           # 兼容RWKV块的参数
-        self.model_type = 'RWKV'          # 模型类型
+        self.n_embd = embed_dim           # 兼容各类网络块的参数
+        self.model_type = model_type      # 模型类型: 'RWKV', 'LSTM', 'GRU', 'Transformer'
         self.h = h                        # 提前预测步数，小于这个时间步发生的数据先筛除
         
-        # 添加其他参数
+        # LSTM特定参数
+        self.lstm_layers = lstm_layers
+        self.lstm_bidirectional = lstm_bidirectional
+        
+        # GRU特定参数
+        self.gru_layers = gru_layers
+        self.gru_bidirectional = gru_bidirectional
+        
+        # Transformer特定参数
+        self.attn_dropout = attn_dropout
+        self.ff_activation = ff_activation
+        
+        # RWKV特定参数
         self.vocab_size = 1               # 在AKI预测任务中使用的词汇表大小
         self.rwkv_emb_scale = 1.0         # RWKV_Init函数的参数
         
+        # 处理其他参数
         for k, v in kwargs.items():
             setattr(self, k, v)
+        
+        # 根据模型类型设置日志
+        logger.info(f"初始化AKI配置: 模型类型={self.model_type}, 层数={self.n_layer}, 嵌入维度={self.embed_dim}")
 
 class AKIPredictor(nn.Module):
     def __init__(self, config):
@@ -71,8 +102,21 @@ class AKIPredictor(nn.Module):
         # Dropout层
         self.dropout = nn.Dropout(config.dropout)
         
-        # RWKV块
-        self.blocks = nn.Sequential(*[Block(config, i) for i in range(config.n_layer)])
+        # 根据模型类型选择不同的网络块
+        if config.model_type == 'RWKV':
+            logger.info(f"使用RWKV块作为网络块")
+            self.blocks = nn.Sequential(*[Block(config, i) for i in range(config.n_layer)])
+        elif config.model_type == 'LSTM':
+            logger.info(f"使用LSTM块作为网络块: 层数={config.lstm_layers}, 双向={config.lstm_bidirectional}")
+            self.blocks = nn.Sequential(*[LSTMBlock(config, i) for i in range(config.n_layer)])
+        elif config.model_type == 'GRU':
+            logger.info(f"使用GRU块作为网络块: 层数={config.gru_layers}, 双向={config.gru_bidirectional}")
+            self.blocks = nn.Sequential(*[GRUBlock(config, i) for i in range(config.n_layer)])
+        elif config.model_type == 'Transformer':
+            logger.info(f"使用Transformer块作为网络块: 注意力头数={config.n_head}, 激活函数={config.ff_activation}")
+            self.blocks = nn.Sequential(*[TransformerBlock(config, i) for i in range(config.n_layer)])
+        else:
+            raise ValueError(f"不支持的模型类型: {config.model_type}")
         
         # 层归一化
         self.ln_f = nn.LayerNorm(config.embed_dim)
