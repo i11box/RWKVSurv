@@ -1,7 +1,7 @@
 data/
 .pyc
 .png
-data/aki_hypertension_data.csv
+*.csv
 *.png
 *.pyc
 

@@ -62,19 +62,59 @@ class Trainer:
             print(f'使用加权损失函数，正样本权重: {pos_weight}')
 
         self.device = 'cpu'
-        if torch.cuda.is_available(): # take over whatever gpus are on the system
+        # 检查模型是否为PyTorch模型（是否有'to'方法）
+        self.is_pytorch_model = hasattr(self.model, 'to')
+        
+        if self.is_pytorch_model and torch.cuda.is_available(): # take over whatever gpus are on the system
             self.device = torch.cuda.current_device()
             self.model = torch.nn.DataParallel(self.model).to(self.device)
 
     def get_run_name(self):
         raw_model = self.model.module if hasattr(self.model, "module") else self.model
         cfg = raw_model.config
-        run_name = str(cfg.vocab_size) + '-' + str(cfg.ctx_len) + '-' + cfg.model_type + '-' + str(cfg.n_layer) + '-' + str(cfg.n_embd)
+        
+        # 对于机器学习模型，生成不同的运行名称
+        if hasattr(cfg, 'model_type') and cfg.model_type in ['RandomForest', 'LogisticRegression']:
+            if cfg.model_type == 'RandomForest':
+                run_name = f'RF-{cfg.rf_n_estimators}-{cfg.rf_max_depth if cfg.rf_max_depth else ""}'\
+                          f'-{cfg.rf_min_samples_split}-{cfg.rf_min_samples_leaf}'
+            else:  # LogisticRegression
+                run_name = f'LR-{cfg.lr_C}-{cfg.lr_penalty}-{cfg.lr_solver}-{cfg.lr_max_iter}'
+        else:
+            # 对于深度学习模型，使用原来的命名方式
+            try:
+                run_name = str(cfg.vocab_size) + '-' + str(cfg.ctx_len) + '-' + cfg.model_type + '-' + str(cfg.n_layer) + '-' + str(cfg.n_embd)
+            except AttributeError:
+                # 如果某些属性不存在，使用更简单的命名
+                run_name = f'{cfg.model_type}-{cfg.static_dim}-{cfg.dynamic_dim}'
+        
         return run_name
 
     def train(self):
         model, config = self.model, self.config
         raw_model = model.module if hasattr(self.model, "module") else model
+        
+        # 对于机器学习模型，使用不同的训练流程
+        if not self.is_pytorch_model:
+            print("使用机器学习模型训练流程")
+            # 直接调用机器学习模型的fit方法
+            train_loss = raw_model.fit(self.train_dataset, self.test_dataset)
+            print(f"训练完成，最终损失: {train_loss:.4f}")
+            
+            # 保存模型
+            if hasattr(config, 'epoch_save_path') and config.epoch_save_path:
+                # 生成保存路径
+                save_path = config.epoch_save_path + self.get_run_name() + '.pkl'
+                print(f"正在保存模型到: {save_path}")
+                
+                # 保存模型
+                raw_model.save(save_path)
+                print(f"模型已保存到: {save_path}")
+            
+            return
+        
+        # 对于PyTorch模型，使用原来的训练流程
+        print("使用PyTorch模型训练流程")
         optimizer = raw_model.configure_optimizers(config)
 
         def run_epoch(split):

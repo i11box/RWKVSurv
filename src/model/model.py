@@ -260,27 +260,6 @@ class AKIPredictor(nn.Module):
         # 注意：直接返回优化器对象，而不是字典
         # 学习率调度器和梯度裁剪需要在trainer.py中单独处理
         return optimizer
-        
-        # 以下代码适用于PyTorch Lightning等框架，但与当前trainer.py不兼容
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, 
-        #     mode='min', 
-        #     factor=0.5, 
-        #     patience=3, 
-        #     verbose=True
-        # )
-        # 
-        # return {
-        #     'optimizer': optimizer,
-        #     'lr_scheduler': {
-        #         'scheduler': scheduler,
-        #         'monitor': 'val_loss',  # 监控验证集损失
-        #         'interval': 'epoch',    # 按epoch更新学习率
-        #         'frequency': 1,         # 每个epoch后更新
-        #         'reduce_on_plateau': True,
-        #     },
-        #     'gradient_clip_val': 1.0,   # 梯度裁剪
-        # }
     
     def _check_nan_inf(self, tensor, name, raise_error=True):
         """检查张量中是否存在NaN或Inf值，并打印相关信息"""
@@ -481,6 +460,12 @@ def prepare_data(data, time_steps=None, h=6):
     """
     # 1. 提取静态特征（所有不包含_t的列，除了subject_id, aki_time和aki_status）
     static_cols = [col for col in data.columns if ('_t' not in col) and (col not in ['subject_id', 'aki_time', 'aki_status'])]
+    
+    # 打印静态特征列名，以便于对应static_1, static_2, ...
+    print("静态特征列名（对应static_1, static_2, ...）:")
+    for i, col in enumerate(static_cols):
+        print(f"static_{i+1}: {col}")
+    
     static_features = torch.tensor(data[static_cols].values, dtype=torch.float32)
     
     # 2. 提取动态特征（所有包含_t的列，但排除aki_time）

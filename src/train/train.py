@@ -6,11 +6,15 @@ import numpy as np
 sys.path.append("D:/05_Project/03_Python/RWKVSurv")
 
 import pandas as pd
-from torch.utils.data import random_split, TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, random_split
+from sklearn.model_selection import train_test_split
+from imblearn.under_sampling import RandomUnderSampler
 
-
+# 添加项目路径到sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.model.model import AKIConfig, AKIPredictor, prepare_data
+from src.model.ml_model import MLConfig, RandomForestModel, LogisticRegressionModel
 from src.train.trainer import Trainer, TrainerConfig
 
 def parse_args():
@@ -26,7 +30,7 @@ def parse_args():
     parser.add_argument('--save_path', type=str, default='data/ckpt/trained-model-', help='模型保存路径')
     # 模型相关参数
     parser.add_argument('--h', type=int, default=6, help='提前预测步数，小于这个时间步发生的数据先筛除')
-    parser.add_argument('--model_type', type=str, default='RWKV', choices=['RWKV', 'LSTM', 'GRU', 'Transformer'], help='模型类型: RWKV, LSTM, GRU, Transformer')
+    parser.add_argument('--model_type', type=str, default='RWKV', choices=['RWKV', 'LSTM', 'GRU', 'Transformer', 'RandomForest', 'LogisticRegression'], help='模型类型: RWKV, LSTM, GRU, Transformer, RandomForest, LogisticRegression')
     
     # LSTM特定参数
     parser.add_argument('--lstm_layers', type=int, default=3, help='LSTM层数')
@@ -39,6 +43,21 @@ def parse_args():
     # Transformer特定参数
     parser.add_argument('--attn_dropout', type=float, default=0.1, help='Transformer注意力机制的dropout率')
     parser.add_argument('--ff_activation', type=str, default='gelu', choices=['gelu', 'relu', 'silu', 'mish'], help='Transformer前馈网络的激活函数类型')
+    
+    # 随机森林特定参数
+    parser.add_argument('--rf_n_estimators', type=int, default=100, help='随机森林中树的数量')
+    parser.add_argument('--rf_max_depth', type=int, default=None, help='树的最大深度，None表示无限制')
+    parser.add_argument('--rf_min_samples_split', type=int, default=2, help='分裂内部节点所需的最小样本数')
+    parser.add_argument('--rf_min_samples_leaf', type=int, default=1, help='叶节点所需的最小样本数')
+    
+    # 逻辑回归特定参数
+    parser.add_argument('--lr_C', type=float, default=1.0, help='逻辑回归正则化强度的倒数')
+    parser.add_argument('--lr_penalty', type=str, default='l2', choices=['l1', 'l2', 'elasticnet', 'none'], help='逻辑回归正则化类型')
+    parser.add_argument('--lr_solver', type=str, default='lbfgs', choices=['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'], help='逻辑回归优化算法')
+    parser.add_argument('--lr_max_iter', type=int, default=100, help='逻辑回归最大迭代次数')
+    
+    # 机器学习模型共用参数
+    parser.add_argument('--ml_max_steps', type=int, default=None, help='机器学习模型使用的最大时间步数，None表示使用所有时间步')
     # 数据平衡相关参数
     parser.add_argument('--undersample', action='store_true', help='是否使用欠采样使正负样本比例为1:1')
     parser.add_argument('--weighted_loss', action='store_true', help='是否使用加权损失函数处理数据不平衡')
@@ -124,25 +143,56 @@ def main():
                 print(f'模型: static_dim={model.config.static_dim}, dynamic_dim={model.config.dynamic_dim}, ctx_len={model.config.ctx_len}')
                 print(f'数据: static_dim={static_dim}, dynamic_dim={dynamic_dim}, ctx_len={time_steps}')
                 print('将创建新模型')
-                model = AKIPredictor(AKIConfig(
-                    static_dim=static_dim,
-                    dynamic_dim=dynamic_dim,
-                    embed_dim=128,
-                    n_layer=3,
-                    n_head=4,
-                    ctx_len=time_steps,
-                    h=args.h,
-                    model_type=args.model_type,
-                    # LSTM特定参数
-                    lstm_layers=args.lstm_layers,
-                    lstm_bidirectional=args.lstm_bidirectional,
-                    # GRU特定参数
-                    gru_layers=args.gru_layers,
-                    gru_bidirectional=args.gru_bidirectional,
-                    # Transformer特定参数
-                    attn_dropout=args.attn_dropout,
-                    ff_activation=args.ff_activation
-                ))
+                # 根据模型类型选择不同的模型类
+                if args.model_type in ['RandomForest', 'LogisticRegression']:
+                    # 使用机器学习模型
+                    config = MLConfig(
+                        static_dim=static_dim,
+                        dynamic_dim=dynamic_dim,
+                        h=args.h,
+                        model_type=args.model_type,
+                        # 随机森林特定参数
+                        rf_n_estimators=args.rf_n_estimators,
+                        rf_max_depth=args.rf_max_depth,
+                        rf_min_samples_split=args.rf_min_samples_split,
+                        rf_min_samples_leaf=args.rf_min_samples_leaf,
+                        # 逻辑回归特定参数
+                        lr_C=args.lr_C,
+                        lr_penalty=args.lr_penalty,
+                        lr_solver=args.lr_solver,
+                        lr_max_iter=args.lr_max_iter,
+                        # 机器学习模型共用参数
+                        ml_max_steps=args.ml_max_steps
+                    )
+                    
+                    if args.model_type == 'RandomForest':
+                        model = RandomForestModel(config)
+                        print(f"使用随机森林模型，树数量: {args.rf_n_estimators}, 最大深度: {args.rf_max_depth if args.rf_max_depth else '无限制'}")
+                    else:  # LogisticRegression
+                        model = LogisticRegressionModel(config)
+                        print(f"使用逻辑回归模型，正则化强度: {args.lr_C}, 正则化类型: {args.lr_penalty}")
+                    
+                else:
+                    # 使用深度学习模型
+                    model = AKIPredictor(AKIConfig(
+                        static_dim=static_dim,
+                        dynamic_dim=dynamic_dim,
+                        embed_dim=128,
+                        n_layer=3,
+                        n_head=4,
+                        ctx_len=time_steps,
+                        h=args.h,
+                        model_type=args.model_type,
+                        # LSTM特定参数
+                        lstm_layers=args.lstm_layers,
+                        lstm_bidirectional=args.lstm_bidirectional,
+                        # GRU特定参数
+                        gru_layers=args.gru_layers,
+                        gru_bidirectional=args.gru_bidirectional,
+                        # Transformer特定参数
+                        attn_dropout=args.attn_dropout,
+                        ff_activation=args.ff_activation
+                    ))
         except Exception as e:
             print(f'加载模型失败: {e}')
             print('将创建新模型')
@@ -168,25 +218,60 @@ def main():
     else:
         # 创建新模型
         print('创建新模型')
-        model = AKIPredictor(AKIConfig(
-            static_dim=static_dim,
-            dynamic_dim=dynamic_dim,
-            embed_dim=128,
-            n_layer=3,
-            n_head=4,
-            ctx_len=time_steps,
-            h=args.h,
-            model_type=args.model_type,
-            # LSTM特定参数
-            lstm_layers=args.lstm_layers,
-            lstm_bidirectional=args.lstm_bidirectional,
-            # GRU特定参数
-            gru_layers=args.gru_layers,
-            gru_bidirectional=args.gru_bidirectional,
-            # Transformer特定参数
-            attn_dropout=args.attn_dropout,
-            ff_activation=args.ff_activation
-        ))
+        
+        # 根据模型类型选择不同的模型类
+        if args.model_type in ['RandomForest', 'LogisticRegression']:
+            # 使用机器学习模型
+            config = MLConfig(
+                static_dim=static_dim,
+                dynamic_dim=dynamic_dim,
+                h=args.h,
+                model_type=args.model_type,
+                # 随机森林特定参数
+                rf_n_estimators=args.rf_n_estimators,
+                rf_max_depth=args.rf_max_depth,
+                rf_min_samples_split=args.rf_min_samples_split,
+                rf_min_samples_leaf=args.rf_min_samples_leaf,
+                # 逻辑回归特定参数
+                lr_C=args.lr_C,
+                lr_penalty=args.lr_penalty,
+                lr_solver=args.lr_solver,
+                lr_max_iter=args.lr_max_iter,
+                # 机器学习模型共用参数
+                ml_max_steps=args.ml_max_steps
+            )
+            
+            if args.model_type == 'RandomForest':
+                model = RandomForestModel(config)
+                print(f"使用随机森林模型，树数量: {args.rf_n_estimators}, 最大深度: {args.rf_max_depth if args.rf_max_depth else '无限制'}")
+            else:  # LogisticRegression
+                model = LogisticRegressionModel(config)
+                print(f"使用逻辑回归模型，正则化强度: {args.lr_C}, 正则化类型: {args.lr_penalty}")
+            # # 启用调试输出，保存到项目根目录下的debug_output目录
+            # debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'debug_output')
+            # model.set_debug(True, debug_dir=debug_dir)
+            # print(f"调试模式已启用，调试输出将保存到: {debug_dir}")
+        else:
+            # 使用深度学习模型
+            model = AKIPredictor(AKIConfig(
+                static_dim=static_dim,
+                dynamic_dim=dynamic_dim,
+                embed_dim=128,
+                n_layer=3,
+                n_head=4,
+                ctx_len=time_steps,
+                h=args.h,
+                model_type=args.model_type,
+                # LSTM特定参数
+                lstm_layers=args.lstm_layers,
+                lstm_bidirectional=args.lstm_bidirectional,
+                # GRU特定参数
+                gru_layers=args.gru_layers,
+                gru_bidirectional=args.gru_bidirectional,
+                # Transformer特定参数
+                attn_dropout=args.attn_dropout,
+                ff_activation=args.ff_activation
+            ))
     
     # 训练配置
     train_config = TrainerConfig(
