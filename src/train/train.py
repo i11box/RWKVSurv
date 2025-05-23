@@ -23,14 +23,14 @@ def parse_args():
     parser.add_argument('--data', type=str, default='data/generated_data_processed_train.csv', help='训练数据路径')
     parser.add_argument('--resume', action='store_true', help='是否从断点继续训练')
     parser.add_argument('--checkpoint', type=str, default='data/ckpt/trained-model-.pt', help='断点模型路径')
-    parser.add_argument('--epochs', type=int, default=500, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=1000, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=128, help='批量大小')
     parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
     parser.add_argument('--save_freq', type=int, default=10, help='模型保存频率')
     parser.add_argument('--save_path', type=str, default='data/ckpt/trained-model-', help='模型保存路径')
     # 模型相关参数
     parser.add_argument('--h', type=int, default=6, help='提前预测步数，小于这个时间步发生的数据先筛除')
-    parser.add_argument('--model_type', type=str, default='RWKV', choices=['RWKV', 'LSTM', 'GRU', 'Transformer', 'RandomForest', 'LogisticRegression'], help='模型类型: RWKV, LSTM, GRU, Transformer, RandomForest, LogisticRegression')
+    parser.add_argument('--model_type', type=str, default='RWKV', choices=['RWKV', 'LSTM', 'GRU', 'Transformer', 'S5', 'RandomForest', 'LogisticRegression'], help='模型类型: RWKV, LSTM, GRU, Transformer, S5, RandomForest, LogisticRegression')
     
     # LSTM特定参数
     parser.add_argument('--lstm_layers', type=int, default=3, help='LSTM层数')
@@ -55,6 +55,16 @@ def parse_args():
     parser.add_argument('--lr_penalty', type=str, default='l2', choices=['l1', 'l2', 'elasticnet', 'none'], help='逻辑回归正则化类型')
     parser.add_argument('--lr_solver', type=str, default='lbfgs', choices=['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'], help='逻辑回归优化算法')
     parser.add_argument('--lr_max_iter', type=int, default=100, help='逻辑回归最大迭代次数')
+    
+    # S5特定参数
+    parser.add_argument('--s5_state_dim', type=int, default=None, help='S5状态空间维度，默认等于嵌入维度')
+    parser.add_argument('--s5_bidir', action='store_true', help='是否使用双向S5')
+    parser.add_argument('--s5_block_count', type=int, default=4, help='S5块数量')
+    parser.add_argument('--s5_liquid', action='store_true', help='是否使用liquid S5')
+    parser.add_argument('--s5_degree', type=int, default=1, help='S5度数')
+    parser.add_argument('--s5_bc_init', type=str, default='dense', help='BC初始化方法')
+    parser.add_argument('--s5_ff_mult', type=float, default=1.0, help='前馈网络乘数')
+    parser.add_argument('--s5_glu', action='store_true', help='是否使用GLU')
     
     # 机器学习模型共用参数
     parser.add_argument('--ml_max_steps', type=int, default=None, help='机器学习模型使用的最大时间步数，None表示使用所有时间步')
@@ -191,7 +201,17 @@ def main():
                         gru_bidirectional=args.gru_bidirectional,
                         # Transformer特定参数
                         attn_dropout=args.attn_dropout,
-                        ff_activation=args.ff_activation
+                        ff_activation=args.ff_activation,
+                        
+                        # S5特定参数
+                        s5_state_dim=args.s5_state_dim,
+                        s5_bidir=args.s5_bidir,
+                        s5_block_count=args.s5_block_count,
+                        s5_liquid=args.s5_liquid,
+                        s5_degree=args.s5_degree,
+                        s5_bc_init=args.s5_bc_init,
+                        s5_ff_mult=args.s5_ff_mult,
+                        s5_glu=args.s5_glu
                     ))
         except Exception as e:
             print(f'加载模型失败: {e}')
@@ -213,7 +233,17 @@ def main():
                 gru_bidirectional=args.gru_bidirectional,
                 # Transformer特定参数
                 attn_dropout=args.attn_dropout,
-                ff_activation=args.ff_activation
+                ff_activation=args.ff_activation,
+                
+                # S5特定参数
+                s5_state_dim=args.s5_state_dim,
+                s5_bidir=args.s5_bidir,
+                s5_block_count=args.s5_block_count,
+                s5_liquid=args.s5_liquid,
+                s5_degree=args.s5_degree,
+                s5_bc_init=args.s5_bc_init,
+                s5_ff_mult=args.s5_ff_mult,
+                s5_glu=args.s5_glu
             ))
     else:
         # 创建新模型
@@ -257,7 +287,7 @@ def main():
                 static_dim=static_dim,
                 dynamic_dim=dynamic_dim,
                 embed_dim=128,
-                n_layer=3,
+                n_layer=8,
                 n_head=4,
                 ctx_len=time_steps,
                 h=args.h,

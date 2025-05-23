@@ -5,11 +5,12 @@ import numpy as np
 import logging
 from pycox.models import CoxPH
 from pycox.models.loss import CoxPHLoss
+from s5 import S5, S5Block
 from .block import Block, RWKV_Init, RMSNorm
 from .lstm import LSTMBlock
 from .gru import GRUBlock
 from .transformer import TransformerBlock
-import math
+import math 
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class AKIConfig:
                  ctx_len=5, 
                  dropout=0.1, 
                  h=6,                    # 提前预测步数，默认为6
-                 model_type='RWKV',       # 模型类型: 'RWKV', 'LSTM', 'GRU', 'Transformer'
+                 model_type='RWKV',       # 模型类型: 'RWKV', 'LSTM', 'GRU', 'Transformer', 'S5'
                  
                  # LSTM特定参数
                  lstm_layers=1,           # LSTM层数
@@ -38,6 +39,17 @@ class AKIConfig:
                  # Transformer特定参数
                  attn_dropout=0.1,        # 注意力机制的dropout率
                  ff_activation='gelu',    # 前馈网络的激活函数类型
+                 
+                 # S5特定参数
+                 s5_state_dim=None,       # S5状态空间维度，默认等于嵌入维度
+                 s5_bidir=False,          # 是否使用双向S5
+                 s5_block_count=1,        # S5块数量
+                 s5_liquid=False,         # 是否使用liquid S5
+                 s5_degree=1,             # S5度数
+                 s5_factor_rank=None,     # 因子分解的秩
+                 s5_bc_init='dense',      # BC初始化方法
+                 s5_ff_mult=1.0,          # 前馈网络乘数
+                 s5_glu=True,             # 是否使用GLU
                  
                  **kwargs):
         # 基本参数
@@ -65,6 +77,17 @@ class AKIConfig:
         # Transformer特定参数
         self.attn_dropout = attn_dropout
         self.ff_activation = ff_activation
+        
+        # S5特定参数
+        self.s5_state_dim = s5_state_dim if s5_state_dim is not None else embed_dim
+        self.s5_bidir = s5_bidir
+        self.s5_block_count = s5_block_count
+        self.s5_liquid = s5_liquid
+        self.s5_degree = s5_degree
+        self.s5_factor_rank = s5_factor_rank
+        self.s5_bc_init = s5_bc_init
+        self.s5_ff_mult = s5_ff_mult
+        self.s5_glu = s5_glu
         
         # RWKV特定参数
         self.vocab_size = 1               # 在AKI预测任务中使用的词汇表大小
@@ -115,6 +138,32 @@ class AKIPredictor(nn.Module):
         elif config.model_type == 'Transformer':
             logger.info(f"使用Transformer块作为网络块: 注意力头数={config.n_head}, 激活函数={config.ff_activation}")
             self.blocks = nn.Sequential(*[TransformerBlock(config, i) for i in range(config.n_layer)])
+        elif config.model_type == 'S5':
+            logger.info(f"使用S5块作为网络块: 状态维度={config.s5_state_dim}, 双向={config.s5_bidir}")
+            from s5.s5_model import S5Block
+            
+            # 创建S5Block列表
+            s5_blocks = []
+            for i in range(config.n_layer):
+                s5_blocks.append(
+                    S5Block(
+                        dim=config.n_embd,  # 使用模型的嵌入维度
+                        state_dim=config.s5_state_dim,  # 状态空间维度
+                        bidir=config.s5_bidir,  # 是否双向
+                        block_count=config.s5_block_count,
+                        liquid=config.s5_liquid,
+                        degree=config.s5_degree,
+                        factor_rank=config.s5_factor_rank,
+                        bcInit=config.s5_bc_init,
+                        ff_mult=config.s5_ff_mult,
+                        glu=config.s5_glu,
+                        ff_dropout=config.dropout,
+                        attn_dropout=config.dropout
+                    )
+                )
+            
+            # 将ModuleList转换为Sequential
+            self.blocks = nn.Sequential(*s5_blocks)
         else:
             raise ValueError(f"不支持的模型类型: {config.model_type}")
         
