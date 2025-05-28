@@ -287,7 +287,7 @@ def main():
                 static_dim=static_dim,
                 dynamic_dim=dynamic_dim,
                 embed_dim=128,
-                n_layer=8,
+                n_layer=2,
                 n_head=4,
                 ctx_len=time_steps,
                 h=args.h,
